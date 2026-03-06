@@ -1,0 +1,94 @@
+version: '3.8'
+services:
+  limsservice:
+    build:
+      context: .
+      dockerfile: docker/lims.dockerfile
+    container_name: limsservice
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - Redis__ConnectionString=redis:6379
+      - Redis__Password=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+    ports:
+      - "53473:80"
+    networks:
+      - services-network
+    restart: unless-stopped
+
+  bbmasterservice:
+    build:
+      context: .
+      dockerfile: docker/bbMaster.dockerfile
+    container_name: bbmasterservice
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - Redis__ConnectionString=redis:6379
+      - Redis__Password=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+    ports:
+      - "5401:80"
+    networks:
+      - services-network
+    restart: unless-stopped
+
+  bbmgmtservice:
+    build:
+      context: .
+      dockerfile: docker/bbMgMt.dockerfile
+    container_name: bbmgmtservice
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - Redis__ConnectionString=redis:6379
+      - Redis__Password=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+    ports:
+      - "5003:80"
+    networks:
+      - services-network
+    restart: unless-stopped
+
+  qc:
+    build:
+      context: .
+      dockerfile: docker/qc.dockerfile
+    container_name: qc
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - Redis__ConnectionString=redis:6379
+      - Redis__Password=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+    ports:
+      - "5406:80"
+    networks:
+      - services-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - services-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+networks:
+  services-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+

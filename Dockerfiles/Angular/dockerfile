@@ -1,0 +1,54 @@
+FROM node:16-alpine AS build
+WORKDIR /app
+
+ARG ANGULAR_ENV=linux
+ENV ANGULAR_ENV=$ANGULAR_ENV
+
+COPY package.json package-lock.json* ./
+RUN npm install --legacy-peer-deps
+
+COPY . .
+
+RUN echo "=== Build Info ===" && \
+    echo "Angular Environment: $ANGULAR_ENV" && \
+    ls -la src/ || echo "src/ not found"
+
+RUN npm run build:$ANGULAR_ENV
+
+# Production stage - using alpine and installing nginx manually
+FROM alpine:latest AS production
+
+# Build argument to choose nginx config
+ARG NGINX_CONFIG=nginx.conf
+ENV NGINX_CONFIG=$NGINX_CONFIG
+
+# Install nginx (this automatically creates nginx user and group)
+RUN apk add --no-cache nginx
+
+# Create required nginx directories and set permissions
+RUN mkdir -p /var/log/nginx \
+             /var/cache/nginx/client_temp \
+             /var/cache/nginx/proxy_temp \
+             /var/cache/nginx/fastcgi_temp \
+             /var/cache/nginx/uwsgi_temp \
+             /var/cache/nginx/scgi_temp \
+             /run/nginx && \
+    chown -R nginx:nginx /var/log/nginx /var/cache/nginx /run/nginx
+
+# Copy the appropriate nginx config based on build arg
+COPY docker/${NGINX_CONFIG} /etc/nginx/nginx.conf
+
+# Copy built Angular app
+COPY --from=build /app/dist /usr/share/nginx/html/
+
+# Set proper permissions for web files
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chmod -R 755 /usr/share/nginx/html
+
+# Switch to nginx user for security
+USER nginx
+
+EXPOSE 80
+
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

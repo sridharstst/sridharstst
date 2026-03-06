@@ -1,0 +1,94 @@
+FROM mcr.microsoft.com/mssql/server:2022-latest
+
+# Install additional tools for better database management
+USER root
+RUN apt-get update && \
+    apt-get install -y \
+        curl \
+        unzip \
+        dos2unix \
+        bc \
+        gzip \
+        jq \
+        && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && \
+    apt-get install -y gnupg && \
+    curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
+    curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
+    apt-get update && \
+    ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev && \
+    echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc && \
+    rm -rf /var/lib/apt/lists/*
+
+# Add the PATH so sqlcmd is available for scripts
+ENV PATH="$PATH:/opt/mssql-tools/bin"   
+
+# Create required directory structure with proper permissions from the start
+RUN mkdir -p /var/opt/mssql/scripts/{tables,functions,procedures,base-data,migrations,excluded} \
+    && mkdir -p /var/opt/mssql/{backup,data,logs} \
+    && chown -R mssql:root /var/opt/mssql/ \
+    && chmod -R 755 /var/opt/mssql/
+
+# Copy database scripts with CORRECT case-sensitive paths
+# First, let's verify the directories exist and copy with error checking
+COPY ENTDBSCRIPT/TABLES/ /var/opt/mssql/scripts/tables/
+COPY ENTDBSCRIPT/FUNCTIONS/ /var/opt/mssql/scripts/functions/
+COPY ENTDBSCRIPT/PROCEDURES/ /var/opt/mssql/scripts/procedures/
+COPY ENTDBSCRIPT/BASEDATA/ /var/opt/mssql/scripts/base-data/
+
+# Verify the copy operations worked (this will fail the build if directories are empty)
+RUN echo "=== Verifying copied files ===" && \
+    ls -la /var/opt/mssql/scripts/ && \
+    echo "Tables count: $(find /var/opt/mssql/scripts/tables -name "*.sql" | wc -l)" && \
+    echo "Functions count: $(find /var/opt/mssql/scripts/functions -name "*.sql" | wc -l)" && \
+    echo "Procedures count: $(find /var/opt/mssql/scripts/procedures -name "*.sql" | wc -l)" && \
+    echo "Base-data count: $(find /var/opt/mssql/scripts/base-data -name "*.sql" | wc -l)" && \
+    echo "=== Copy verification complete ==="
+
+# Copy main initialization script
+COPY docker/init-database.sh /var/opt/mssql/init-database.sh
+
+# Copy the dedicated SQL script executor
+COPY docker/execute-sql-scripts.sh /var/opt/mssql/execute-sql-scripts.sh
+
+# Copy health check script
+COPY docker/healthcheck.sh /var/opt/mssql/healthcheck.sh
+
+# Convert line endings and set executable permissions
+RUN find /var/opt/mssql/scripts -name "*.sql" -exec dos2unix {} \; \
+    && dos2unix /var/opt/mssql/init-database.sh \
+    && dos2unix /var/opt/mssql/execute-sql-scripts.sh \
+    && dos2unix /var/opt/mssql/healthcheck.sh \
+    && chmod +x /var/opt/mssql/init-database.sh \
+    && chmod +x /var/opt/mssql/execute-sql-scripts.sh \
+    && chmod +x /var/opt/mssql/healthcheck.sh
+
+# Final permission adjustment - only touch directories that exist
+RUN chown -R mssql:root /var/opt/mssql/ && \
+    find /var/opt/mssql -type d -exec chmod 755 {} \; && \
+    find /var/opt/mssql -type f -name "*.sql" -exec chmod 644 {} \; && \
+    find /var/opt/mssql -type f -name "*.sh" -exec chmod 755 {} \;
+
+# Switch back to mssql user
+USER root
+
+# Expose SQL Server port
+EXPOSE 1433
+
+# Set environment variables for better performance and configuration
+ENV MSSQL_COLLATION=SQL_Latin1_General_CP1_CI_AS
+ENV MSSQL_MEMORY_LIMIT_MB=2048
+
+# Set default configuration for script execution
+ENV MAX_PARALLEL_JOBS=3
+ENV RETRY_ATTEMPTS=2
+ENV CONTINUE_ON_ERROR=false
+ENV DB_TIMEOUT=300
+
+# Health check using the dedicated script
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["/var/opt/mssql/healthcheck.sh"]
+
+# Start the initialization script
+ENTRYPOINT ["/var/opt/mssql/init-database.sh"]

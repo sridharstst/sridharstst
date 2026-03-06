@@ -1,0 +1,128 @@
+version: '3.8'
+
+services:
+  sqlserver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: sqlserver-db
+    hostname: sqlserver-db
+    
+    environment:
+      # SQL Server Configuration
+      - SA_PASSWORD=${DB_SA_PASSWORD}
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Express
+      - DB_NAME=${DB_NAME}
+      - FORCE_RESTORE=false
+      - SKIP_RESTORE_IF_EXISTS=true
+      
+      # Database Users Configuration
+      - DB_READ_USER=${DB_READ_USER:-db_reader}
+      - DB_READ_PASSWORD=${DB_READ_PASSWORD}
+      - DB_EXECUTE_USER=${DB_EXECUTE_USER:-db_executor}
+      - DB_EXECUTE_PASSWORD=${DB_EXECUTE_PASSWORD}
+      - DB_APP_USER=${DB_APP_USER:-db_application}
+      - DB_APP_PASSWORD=${DB_APP_PASSWORD}
+      
+      # Backup Configuration
+      - DB_BACKUP_FILE=${DB_BACKUP_FILE:-}
+      - FORCE_RESTORE=${FORCE_RESTORE:-false}
+      
+      # Error Handling Configuration - STABILITY FOCUSED
+      - IGNORE_SCRIPT_ERRORS=${IGNORE_SCRIPT_ERRORS:-true}
+      - CLEAR_FAILED_SCRIPTS=${CLEAR_FAILED_SCRIPTS:-false}
+      - BATCH_SIZE=20  # Smaller batches for stability
+      
+      # Enhanced SQL Server Configuration - CONSERVATIVE SETTINGS
+      - MSSQL_AGENT_ENABLED=false
+      - MSSQL_MEMORY_LIMIT_MB=2048  # Conservative memory limit
+      - MSSQL_LCID=1033
+      - MSSQL_COLLATION=SQL_Latin1_General_CP1_CI_AS
+      
+    volumes:
+      - /opt/mssql/data:/var/opt/mssql/data
+      - /opt/mssql/logs:/var/opt/mssql/log
+      - /opt/mssql/backup:/var/opt/mssql/backup
+      - /opt/src/backup:/var/opt/mssql/backup/host
+      
+    # Conservative startup and shutdown handling
+    stop_grace_period: 180s  # More time for graceful shutdown
+    stop_signal: SIGTERM
+    
+    ports:
+      - "${SQL_SERVER_PORT:-1433}:1433"
+    
+    networks:
+      - db-network
+    
+    # Aggressive restart policy for stability
+    restart: unless-stopped
+    
+    # Conservative but adequate resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 4G      # Reasonable limit
+          cpus: '2.0'     # Adequate CPU
+        reservations:
+          memory: 1G      # Minimum guarantee
+          cpus: '0.5'
+    
+    # Health check with longer intervals for heavy operations
+    healthcheck:
+      test: ["CMD-SHELL", "/var/opt/mssql/healthcheck.sh"]
+      interval: 45s       # Longer interval
+      timeout: 20s        # More timeout
+      retries: 3          # Fewer retries but longer timeout
+      start_period: 600s  # 10 minutes for initial setup
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Conservative logging to reduce I/O overhead
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+        compress: "true"
+    
+    # System limits optimized for stability
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 32768     # Reasonable limit
+        hard: 32768
+      nproc:
+        soft: 16384     # Conservative process limit
+        hard: 16384
+    
+    # Moderate temporary filesystem
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+      - /var/tmp:size=256M,mode=1777
+    
+    # Labels for container management
+    labels:
+      - "com.example.service=sqlserver"
+      - "com.example.environment=${ENVIRONMENT:-development}"
+      - "com.example.version=${VERSION:-latest}"
+
+# Network configuration
+networks:
+  db-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-sqlserver
+      com.docker.network.driver.mtu: 1500
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    labels:
+      - "com.example.network=database"
