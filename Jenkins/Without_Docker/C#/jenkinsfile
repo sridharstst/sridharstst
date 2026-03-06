@@ -1,0 +1,368 @@
+pipeline {
+    agent any
+    environment {
+         GITHUB_URL = 'https://github.com/ORG/ORG.git'
+         Files_To_Keep = 30
+         Version = "V1.0.0.1"
+         BUILD_NUMBER = "${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Branch Configuration'){
+            steps {
+                script {
+                    echo "Detected branch: ${env.BRANCH_NAME}"
+                    switch(env.BRANCH_NAME) {
+                        case 'QA_LIMS_ENTERPRISE':
+                            env.PIPELINE_STAGE = "LIMS QA"
+                            env.srvLimsProjectName = "WEB.LABV1/DEV.API.SERVICE"
+                            env.ReleaseFolder = "R:/Jenkins_Release/LIS_ENT_QA/Service"
+                            env.ReleaseFileName = "entQA-lis-svc"
+                            env.scriptPath = "W:/Automation_Script/LIMS_ENTERPRISE_QA/Scripts/Service/LIS_Lims.ps1"
+                            break
+                        case 'Development':
+                            env.PIPELINE_STAGE = "LIMS Development"
+                            env.srvLimsProjectName = "WEB.LABV1/DEV.API.SERVICE"
+                            env.ReleaseFolder = "R:/Jenkins_Release/LIS_ENT/Service"
+                            env.ReleaseFileName = "ent-lis-svc"
+                            env.scriptPath = "W:/Automation_Script/LIMS_ENTERPRISE/Scripts/Service/LIS_Lims.ps1"
+                            break
+                        case 'Production':
+                            env.PIPELINE_STAGE = "LIMS Production"
+                            env.srvLimsProjectName = "WEB.LABV1/DEV.API.SERVICE"
+                            env.ReleaseFolder = "R:/Jenkins_Release/LIS_ENT_PROD/Service"
+                            env.ReleaseFileName = "entProd-lis-svc"
+                            env.scriptPath = "W:/Automation_Script/LIMS_ENTERPRISE_PROD/Scripts/Service/LIS_Lims.ps1"
+                            break
+                       default:
+                            error "❌ Unsupported branch: ${env.BRANCH_NAME}"
+                    }
+                    echo "Using script: ${env.scriptPath}"
+                    echo "Release folder: ${env.ReleaseFolder}"
+                }
+            }
+        }
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "✅ Checked out ${env.BRANCH_NAME}"
+            }
+        }
+        stage('Clean Build') {
+            steps {
+                script {
+                    echo 'Starting comprehensive clean process...'
+                    
+                    powershell """
+                        # Set error handling
+                        \$ErrorActionPreference = "Continue"
+                        \$VerbosePreference = "Continue"
+                        
+                        try {
+                            # Navigate to the project directory
+                            if (Test-Path "\${env:srvLimsProjectName}") {
+                                Set-Location "\${env:srvLimsProjectName}"
+                                Write-Host "Working directory: \$(Get-Location)" -ForegroundColor Green
+                            } else {
+                                throw "Project directory '\${env:srvLimsProjectName}' not found"
+                            }
+                            
+                            # Function to safely remove directories
+                            function Remove-DirectorySafely {
+                                param([string]\$Path, [string]\$Description)
+                                
+                                if (Test-Path \$Path) {
+                                    try {
+                                        Write-Host "Removing \$Description at: \$Path" -ForegroundColor Yellow
+                                        Remove-Item -Path \$Path -Recurse -Force -ErrorAction Stop
+                                        Write-Host "Successfully removed: \$Path" -ForegroundColor Green
+                                    }
+                                    catch {
+                                        Write-Warning "Failed to remove \$Path : \$(\$_.Exception.Message)"
+                                        # Try alternative method
+                                        try {
+                                            cmd /c "rmdir /s /q `"\$Path`""
+                                            Write-Host "Successfully removed using cmd: \$Path" -ForegroundColor Green
+                                        }
+                                        catch {
+                                            Write-Error "Failed to remove \$Path with both methods"
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            # Run dotnet clean with error handling
+                            Write-Host "Running dotnet clean..." -ForegroundColor Cyan
+                            
+                            if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+                                try {
+                                    Write-Host "Cleaning Release configuration..."
+                                    dotnet clean --configuration Release --verbosity minimal
+                                    Write-Host "Release clean completed" -ForegroundColor Green
+                                    
+                                    Write-Host "Cleaning Debug configuration..."
+                                    dotnet clean --configuration Debug --verbosity minimal
+                                    Write-Host "Debug clean completed" -ForegroundColor Green
+                                }
+                                catch {
+                                    Write-Warning "dotnet clean failed: \$(\$_.Exception.Message)"
+                                }
+                            } else {
+                                Write-Warning "dotnet CLI not found, skipping dotnet clean"
+                            }
+                            
+                            # Remove bin folders recursively - FIXED VERSION
+                            Write-Host "Searching for bin folders..." -ForegroundColor Cyan
+                            \$binFolders = Get-ChildItem -Path . -Recurse -Directory -Filter "bin" -ErrorAction SilentlyContinue
+                            
+                            if (\$binFolders -and \$binFolders.Count -gt 0) {
+                                Write-Host "Found \$(\$binFolders.Count) bin folder(s)" -ForegroundColor Yellow
+                                \$binFolders | ForEach-Object {
+                                    Remove-DirectorySafely -Path \$_.FullName -Description "bin folder"
+                                }
+                            } else {
+                                Write-Host "No bin folders found" -ForegroundColor Green
+                            }
+                            
+                            # Remove obj folders recursively - FIXED VERSION
+                            Write-Host "Searching for obj folders..." -ForegroundColor Cyan
+                            \$objFolders = Get-ChildItem -Path . -Recurse -Directory -Filter "obj" -ErrorAction SilentlyContinue
+                            
+                            if (\$objFolders -and \$objFolders.Count -gt 0) {
+                                Write-Host "Found \$(\$objFolders.Count) obj folder(s)" -ForegroundColor Yellow
+                                \$objFolders | ForEach-Object {
+                                    Remove-DirectorySafely -Path \$_.FullName -Description "obj folder"
+                                }
+                            } else {
+                                Write-Host "No obj folders found" -ForegroundColor Green
+                            }
+                            
+                            # Remove packages folder if it exists (NuGet packages)
+                            Remove-DirectorySafely -Path "packages" -Description "packages folder"
+                            
+                            # Remove TestResults folder if it exists
+                            Remove-DirectorySafely -Path "TestResults" -Description "TestResults folder"
+                            
+                            # Remove .vs folder if it exists (Visual Studio temp files)
+                            \$vsFolders = Get-ChildItem -Path . -Directory -Filter ".vs" -ErrorAction SilentlyContinue
+                            \$vsFolders | ForEach-Object {
+                                Remove-DirectorySafely -Path \$_.FullName -Description ".vs folder"
+                            }
+                            
+                            # Clear NuGet cache
+                            Write-Host "Clearing NuGet cache..." -ForegroundColor Cyan
+                            try {
+                                if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+                                    dotnet nuget locals all --clear
+                                    Write-Host "NuGet cache cleared successfully" -ForegroundColor Green
+                                }
+                            }
+                            catch {
+                                Write-Warning "Failed to clear NuGet cache: \$(\$_.Exception.Message)"
+                            }
+                            
+                            # Final verification
+                            Write-Host "Performing final verification..." -ForegroundColor Cyan
+                            \$remainingBin = Get-ChildItem -Path . -Recurse -Directory -Filter "bin" -ErrorAction SilentlyContinue
+                            \$remainingObj = Get-ChildItem -Path . -Recurse -Directory -Filter "obj" -ErrorAction SilentlyContinue
+                            
+                            if (\$remainingBin) {
+                                Write-Warning "Warning: \$(\$remainingBin.Count) bin folder(s) still exist"
+                                \$remainingBin | ForEach-Object { Write-Host "  - \$(\$_.FullName)" -ForegroundColor Yellow }
+                            }
+                            
+                            if (\$remainingObj) {
+                                Write-Warning "Warning: \$(\$remainingObj.Count) obj folder(s) still exist"
+                                \$remainingObj | ForEach-Object { Write-Host "  - \$(\$_.FullName)" -ForegroundColor Yellow }
+                            }
+                            
+                            if (-not \$remainingBin -and -not \$remainingObj) {
+                                Write-Host "✅ Clean process completed successfully - all build artifacts removed!" -ForegroundColor Green
+                            } else {
+                                Write-Host "⚠️  Clean process completed with warnings - some artifacts may remain" -ForegroundColor Yellow
+                            }
+                        }
+                        catch {
+                            Write-Error "Clean process failed: \$(\$_.Exception.Message)"
+                            Write-Host "Stack trace: \$(\$_.ScriptStackTrace)" -ForegroundColor Red
+                            exit 1
+                        }
+                        finally {
+                            # Reset error preference
+                            \$ErrorActionPreference = "Stop"
+                        }
+                    """
+                }
+            }
+            post {
+                always {
+                    echo 'Clean stage completed'
+                }
+                failure {
+                    echo 'Clean stage failed - check logs above for details'
+                }
+            }
+        }
+        stage('Build LIMSService') {
+            steps {
+                script {
+                    echo "Building Service..."
+                    bat """
+                        echo Building project: %srvLimsProjectName%
+                        cd %srvLimsProjectName%
+                        echo running dotnet restore
+                        dotnet restore
+                        echo Building project with version: %Version%
+                        echo Build Number: %BUILD_NUMBER%
+                        dotnet build -c Release /p:Version=%BUILD_NUMBER%
+
+                        if %ERRORLEVEL% EQU 0 (
+                            echo ✅ Build completed successfully
+                        ) else (
+                            echo ❌ Build failed with error code %ERRORLEVEL%
+                            exit /b %ERRORLEVEL%
+                        )     
+                    """
+                }
+            }
+            post {
+                success {
+                    echo '✅ Build stage succeeded'
+                    script {
+                           currentBuild.description = "✅ Build success for ${env.BRANCH_NAME}"
+                        }
+                    
+                }
+                failure {
+                    echo '❌ Build stage failed'
+                    script {
+                        currentBuild.result = 'FAILED'
+                        currentBuild.description = "❌ Build failed for ${env.BRANCH_NAME}"
+                    }
+                }
+            }
+        }
+        stage('Package - LIMS') {
+            steps {
+                bat """
+                echo "Packaging LIMS Service..."
+                echo "Current Directory: %CD%"
+                cd ${srvLimsProjectName}
+                dotnet publish -c Release --no-build
+                if %ERRORLEVEL% EQU 0 (
+                            echo ✅ Build completed successfully
+                        ) else (
+                            echo ❌ Build failed with error code %ERRORLEVEL%
+                            exit /b %ERRORLEVEL%
+                        )  
+                """
+            }
+            
+        }
+        stage('Clean Release Folder') {
+            steps {
+                script {
+                    echo "Cleaning release folder..."
+                    
+                    powershell '''
+                        Write-Host "Cleaning release folder: $env:ReleaseFolder"
+                        Write-Host "Files to keep: $env:Files_To_Keep"
+
+                        if (Test-Path $env:ReleaseFolder) {
+                            Write-Host "Release folder exists, cleaning old files..."
+                            $files = Get-ChildItem -Path $env:ReleaseFolder | Sort-Object LastWriteTime -Descending
+                            $file_To_delete = $files | Select-Object -Skip $env:Files_To_Keep
+                            
+                            if ($file_To_delete) {
+                                Write-Host "Found $($file_To_delete.Count) files to delete"
+                                foreach($file in $file_To_delete) {
+                                    Write-Host "Deleting: $($file.Name)"
+                                    if ($file.PSIsContainer) {
+                                        Remove-Item -Recurse -Force $file.FullName
+                                    } else {
+                                        Remove-Item -Force $file.FullName
+                                    }
+                                }
+                                Write-Host "✅ Cleanup completed"
+                            } else {
+                                Write-Host "No files to delete (within keep limit)"
+                            }
+                        } else {
+                            Write-Host "Release folder does not exist yet"
+                        }
+                    '''
+                }
+            }
+        }      
+        stage('Package Release') {
+            steps {
+                script {
+                    def fileName = "${env.ReleaseFileName}-${env.Version}-${env.BUILD_NUMBER}.7z"
+                    echo "Creating release package: ${fileName}"
+                    powershell """
+                        \$fileName = "${fileName}"
+                        \$publishPath = "\${env:srvLimsProjectName}/bin/Release/net8.0/publish"
+                        if (!(Test-Path \${env:ReleaseFolder})) {
+                            New-Item -ItemType Directory -Path \$env:ReleaseFolder -Force
+                        }
+                        Set-Location \$publishPath
+                        & "C:/Program Files/7-Zip/7z.exe" a -t7z -mx=9 -m0=LZMA2 -ms=1g -r "\$env:ReleaseFolder/\$fileName" *
+                        if (\$LASTEXITCODE -ne 0) {
+                            exit \$LASTEXITCODE
+                        }
+                    """
+                }
+            }
+        }  
+         stage('Execute Deployment Script') {
+            steps {
+                script {
+                    try {
+                        def command = "& '${env.scriptPath}' -Version '${env.Version}' -Build '${env.BUILD_NUMBER}'"
+                        def powershellOutput = powershell(
+                            script: command,
+                            returnStatus: true
+                        )
+                        if (powershellOutput != 0)
+                        {
+                            echo "powershell script executed with non-zero status :  ${powershellOutput}"
+                            currentBuild.status = 'FAILURE'
+                        }
+                    }
+                    catch (err)
+                    {
+                        error "occured while running the powershell script: ${err}"
+                        currentBuild.status = 'FAILURE'
+                    }
+                    
+                }
+            }
+        }
+        // stage('Notify') {
+        //     steps {
+        //         script {
+        //             def buildStatus = currentBuild.result ?: 'SUCCESS'
+        //             def subject = "Build Notification: ${buildStatus}"
+        //             def body = """
+        //                 Job Name: ${env.JOB_NAME}
+        //                 Build Number: ${env.BUILD_NUMBER}
+        //                 Build Status: ${buildStatus}
+        //                 Job URL: ${env.BUILD_URL}
+        //             """
+        
+        //             if (buildStatus == 'SUCCESS') {
+        //                 body += "\nThe build has completed successfully."
+        //             } else {
+        //                 body += "\nThe build has failed."
+        //             }
+        
+        //             mail to: 'sivakumarsridhar71@gmail.com ',
+        //                 subject: subject,
+        //                 body: body,
+        //                 from: 'ssridhar71@outlook.com' 
+        //         }
+        //     }
+        // }
+    }
+    
+ }

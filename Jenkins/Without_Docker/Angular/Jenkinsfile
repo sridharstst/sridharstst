@@ -1,0 +1,253 @@
+pipeline {
+    agent any
+
+    environment {
+        GITHUB_URL = 'https://github.com/YOUR_ORG/YOUR_REPO.git'
+        Files_To_Keep = 30
+        Version = ""
+        BUILD_NUMBER = "${BUILD_NUMBER}"
+        SERVICE_PATHS = "WEB.LABV1/DEV.WEBAPP/, "
+        SHARED_PATHS = "Jenkinsfile"
+    }
+//test
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    // Initialize inline functions
+                    sharedFunctions = [
+                        hasServiceChanges: { servicePaths, sharedPaths = [] ->
+                            try {
+                                def changesText = ""
+                                
+                                if (env.GIT_PREVIOUS_COMMIT && env.GIT_PREVIOUS_COMMIT != env.GIT_COMMIT) {
+                                    changesText = bat(
+                                        script: "@git diff --name-only ${env.GIT_PREVIOUS_COMMIT} ${env.GIT_COMMIT}",
+                                        returnStdout: true
+                                    ).trim()
+                                } else {
+                                    changesText = bat(
+                                        script: "@git diff-tree --no-commit-id --name-only -r ${env.GIT_COMMIT}",
+                                        returnStdout: true
+                                    ).trim()
+                                }
+                                
+                                if (!changesText) {
+                                    echo "No changes found"
+                                    return false
+                                }
+                                
+                                def changes = changesText.split('\n').findAll { it?.trim() }
+                                
+                                echo "Changed files (${changes.size()}):"
+                                changes.each { echo "  - ${it}" }
+                                
+                                // Check service paths
+                                def serviceChanged = changes.any { file ->
+                                    servicePaths.any { path ->
+                                        file.replace('\\', '/').startsWith(path.replace('\\', '/'))
+                                    }
+                                }
+                                
+                                if (serviceChanged) {
+                                    echo "✅ Changes in service paths"
+                                    return true
+                                }
+                                
+                                // Check shared paths
+                                if (sharedPaths) {
+                                    def sharedChanged = changes.any { file ->
+                                        sharedPaths.any { path ->
+                                            file.replace('\\', '/').startsWith(path.replace('\\', '/'))
+                                        }
+                                    }
+                                    
+                                    if (sharedChanged) {
+                                        echo "✅ Changes in shared paths"
+                                        return true
+                                    }
+                                }
+                                
+                                echo "❌ No changes detected"
+                                return false
+                                
+                            } catch (Exception e) {
+                                echo "⚠️ Error: ${e.message}"
+                                return true
+                            }
+                        },
+                        
+                        skipBuildGracefully: { reason ->
+                            echo "⏭️ SKIPPING: ${reason}"
+                            currentBuild.result = 'NOT_BUILT'
+                            currentBuild.description = "⏭️ Skipped: ${reason}"
+                            error("Build skipped - ${reason}")
+                        }
+                    ]
+                    
+                    echo "✅ Functions initialized"
+                }
+            }
+        }
+        stage('Detect Changes') {
+            steps {
+                script {
+                    echo "Checking for changes in this service"
+                    
+                    def servicePaths = env.SERVICE_PATHS.split(',').collect { it.trim() }
+                    def sharedPaths = env.SHARED_PATHS.split(',').collect { it.trim() }
+                    
+                    echo "Service paths: ${servicePaths}"
+                    echo "Shared paths: ${sharedPaths}"
+                    
+                    def hasChanges = sharedFunctions.hasServiceChanges(servicePaths, sharedPaths)
+                    
+                    if (!hasChanges) {
+                        sharedFunctions.skipBuildGracefully("No changes detected in service")
+                    } else {
+                        echo "✅ Changes detected - proceeding with build"
+                    }
+                }
+            }
+        }
+        stage('Branch Configuration') {
+            steps {
+                script {
+                    echo "Detected Branch: ${env.BRANCH_NAME}"
+
+                    switch (env.BRANCH_NAME) {
+                        case 'QA_LIMS_ENTERPRISE':
+                            env.PIPELINE_STAGE = 'uatQA'
+                            env.uiProjectName = "WEB.LABV1/DEV.WEBAPP"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/QA/Ui"
+                            env.ReleaseFileName = "entQA-lis-ui"
+                            env.scriptPath = "E:/Deployments/Enterprise/QA/Scripts/Ui/LIS_Ui.ps1"
+                            break
+
+                        case 'Development':
+                            env.PIPELINE_STAGE = 'uat'
+                            env.uiProjectName = "WEB.LABV1/DEV.WEBAPP"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/Dev/Ui"
+                            env.ReleaseFileName = "ent-lis-ui"
+                            env.scriptPath = "E:/Deployments/Enterprise/DEV/Scripts/Ui/LIS_Ui.ps1"
+                            break
+
+                        case 'Ederma_design':
+                            env.PIPELINE_STAGE = 'uat'
+                            env.uiProjectName = "WEB.LABV1/DEV.WEBAPP"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/Ederma"
+                            env.ReleaseFileName = "ent-lis-ederma"
+                            env.scriptPath = "E:/Deployments/Enterprise/Dev/Scripts/Ederma/LIS_Ederma.ps1"
+                            break
+                        
+                        case 'curaCloud_design':
+                            env.PIPELINE_STAGE = 'uat'
+                            env.uiProjectName = "WEB.LABV1/DEV.WEBAPP"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/curaCloud"
+                            env.ReleaseFileName = "ent-lis-curacloud"
+                            env.scriptPath = "E:/Deployments/Enterprise/Dev/Scripts/curaCloud/LIMS_curaCloud.ps1"
+                            break
+
+                        default:
+                            error "❌ Unsupported branch: ${env.BRANCH_NAME}"
+                    }
+
+                    echo "Using script: ${env.scriptPath}"
+                    echo "Release folder: ${env.ReleaseFolder}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "✅ Checked out ${env.BRANCH_NAME}"
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                powershell """
+                    Write-Host "Installing dependencies for: ${env.uiProjectName}"
+                    Set-Location "${env.uiProjectName}"
+                    npm install --force --save
+                    if (\$LASTEXITCODE -ne 0) {
+                        Write-Host "❌ NPM install failed"
+                        exit \$LASTEXITCODE
+                    }
+                """
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                bat """
+                    echo Building project: %uiProjectName%
+                    cd %uiProjectName%
+                    npm run build:%PIPELINE_STAGE%
+                    if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+                """
+            }
+        }
+
+        stage('Clean Release Folder') {
+            steps {
+                powershell '''
+                    Write-Host "Cleaning release folder: $env:ReleaseFolder"
+                    if (Test-Path $env:ReleaseFolder) {
+                        $files = Get-ChildItem -Path $env:ReleaseFolder | Sort-Object LastWriteTime -Descending
+                        $old = $files | Select-Object -Skip $env:Files_To_Keep
+                        $old | ForEach-Object {
+                            Write-Host "Deleting: $($_.FullName)"
+                            Remove-Item -Force -Recurse $_.FullName
+                        }
+                    }
+                '''
+            }
+        }
+
+        stage('Package Release') {
+            steps {
+                script {
+                    def fileName = "${env.ReleaseFileName}-${env.Version}-${env.BUILD_NUMBER}.7z"
+                    powershell """
+                        \$fileName = "${fileName}"
+                        \$distPath = "${env.uiProjectName}/dist"
+                        if (!(Test-Path \$env:ReleaseFolder)) {
+                            New-Item -ItemType Directory -Path \$env:ReleaseFolder -Force
+                        }
+                        Set-Location \$distPath
+                        & "C:/Program Files/7-Zip/7z.exe" a -t7z -mx=9 -m0=LZMA2 -ms=1g -r "\$env:ReleaseFolder/\$fileName" *
+                        if (\$LASTEXITCODE -ne 0) {
+                            exit \$LASTEXITCODE
+                        }
+                    """
+                }
+            }
+        }
+        stage('Execute Deployment Script') {
+            steps {
+                script {
+                    try {
+                        def command = "& '${env.scriptPath}' -Version '${env.Version}' -Build '${env.BUILD_NUMBER}'"
+                        def powershellOutput = powershell(
+                            script: command,
+                            returnStatus: true
+                        )
+                        if (powershellOutput != 0)
+                        {
+                            echo "powershell script executed with non-zero status :  ${powershellOutput}"
+                            currentBuild.status = 'FAILURE'
+                        }
+                    }
+                    catch (err)
+                    {
+                        error "occured while running the powershell script: ${err}"
+                        currentBuild.status = 'FAILURE'
+                    }
+                    
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,222 @@
+ 
+pipeline {
+    agent any
+    environment {
+      GITHUB_URL = 'https://github.com/ORG/ORG.git'
+      Files_To_Keep = 30
+      BUILD_NUMBER = "${BUILD_NUMBER}" 
+      Version = "V1.0.0.1"
+      reportFolder = "${WORKSPACE}/ReportFiles/LIMS"
+      BloodBankSrc = "${WORKSPACE}/ReportFiles/BloodBank"
+   }
+   stages {
+        stage( 'Branch Configuration'){
+            steps {
+                script {
+                    echo "Detected branch: ${env.BRANCH_NAME}"
+                    switch(env.BRANCH_NAME) {
+                        case 'Development':
+                            env.PIPELINE_STAGE = "DB Development"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/Dev/DB"
+                            env.reportReleaseFolder = "E:/Jenkins_release/enterprise/Dev/report"
+                            env.ProjectName = "ENTDBSCRIPT"
+                            env.ReleaseFileName = "ent-lis-db"
+                            env.reportReleaseFileName = "ent-lis-report"
+                            env.FTEBaseData = "UAT"
+                            env.scriptPath = "E:/Deployments/Enterprise/Dev/Scripts/DB/LIS_DB.ps1"
+                            break
+                        case 'QA_LIMS_ENTERPRISE':
+                            env.PIPELINE_STAGE = "DB QA"
+                            env.ReleaseFolder = "E:/Jenkins_release/enterprise/QA/DB"
+                            env.reportReleaseFolder = "E:/Jenkins_release/enterprise/QA/report"
+                            env.ProjectName = "ENTDBSCRIPT"
+                            env.ReleaseFileName = "entQA-lis-db"
+                            env.reportReleaseFileName = "entQA-lis-report"
+                            env.FTEBaseData = "UATQA"
+                            env.scriptPath = "E:/Deployments/Enterprise/QA/Scripts/DB/LIS_DB.ps1"
+                            break
+                        case 'Production':
+                            env.PIPELINE_STAGE = "DB Production"
+                            env.ReleaseFolder = "R:/Jenkins_Release/LIS_ENT_PROD/DB"
+                            env.reportReleaseFolder = "R:/Jenkins_Release/LIS_ENT_PROD/report"
+                            env.ProjectName = "ENTDBSCRIPT"
+                            env.ReleaseFileName = "entProd-lis-db"
+                            env.reportReleaseFileName = "entProd-lis-report"
+                            env.FTEBaseData = "PROD"
+                            env.scriptPath = "W:/Automation_Script/LIMS_ENTERPRISE_PROD/Scripts/DB/LIS_DB.ps1"
+                            break
+                    }
+                }
+            }
+        }
+         stage('Checkout') {
+            steps {
+                checkout scm
+                echo "✅ Checked out ${env.BRANCH_NAME}"
+            }
+        }
+        stage('Clean Release Folder') {
+            steps {
+                script {
+                    echo "Cleaning release folder..."
+                    
+                    powershell '''
+                        Write-Host "Files to keep: $env:Files_To_Keep"
+                        $combinedReleaseFolder = @($env:ReleaseFolder, $env:reportReleaseFolder)
+
+                        foreach ($path in $combinedReleaseFolder) {
+                            if (Test-Path $path) {
+                                Write-Host "Release folder exists, cleaning old files..."
+                                $files = Get-ChildItem -Path $path | Sort-Object LastWriteTime -Descending
+                                $file_To_delete = $files | Select-Object -Skip $env:Files_To_Keep
+                                
+                                if ($file_To_delete) {
+                                    Write-Host "Found $($file_To_delete.Count) files to delete"
+                                    foreach($file in $file_To_delete) {
+                                        Write-Host "Deleting: $($file.Name)"
+                                        if ($file.PSIsContainer) {
+                                            Remove-Item -Recurse -Force $file.FullName
+                                        } else {
+                                            Remove-Item -Force $file.FullName
+                                        }
+                                    }
+                                    Write-Host "✅ Cleanup completed"
+                                } else {
+                                    Write-Host "No files to delete (within keep limit)"
+                                }
+                            } else {
+                                Write-Host "Release folder does not exist yet"
+                            }
+                        }
+
+                        
+                    '''
+                }
+            }
+        }  
+         stage('Clean Workspace') {
+            steps {
+               script {
+                     powershell """
+                     cd ${env:ProjectName}
+                     git clean -fdx
+                     """
+               }
+            }
+         }
+         stage('Package') {
+            steps {
+               script
+                {
+                    def fileName = "${env.ReleaseFileName}-${env.Version}-${env.BUILD_NUMBER}.7z"
+                    powershell """
+                    if (!(Test-Path \${env:ReleaseFolder})) {
+                        mkdir \${env:ReleaseFolder}
+                    }   
+                    
+                                  
+                    cd ${env:ProjectName}
+                    if (Test-Path Pro_GetAuditTrailLogs_MISReport.sql) { Write-Error "Deleted file still exists in workspace" }
+                     & "C:/Program Files/7-Zip/7z.exe" a -t7z -mx=9 -m0=LZMA2 -ms=1g -r "\${env:ReleaseFolder}/${fileName}" 
+                    """
+                }
+            } 
+         }
+         stage('reportPackage'){
+            steps {
+                script
+                {
+                    def powershellScript = '''
+                    $ErrorActionPreference = "Stop"
+
+                    function New-TempFolder {
+                        $tempFolder = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString())
+                        $folder = New-Item -ItemType Directory -Path $tempFolder -ErrorAction Stop
+                        Write-Host "Temporary folder created at: $($folder.FullName)"
+                        return $folder.FullName
+                    }
+
+                    try {
+                        $tempFolder = New-TempFolder
+
+                        
+                        $sourcePath = $env:reportFolder   
+
+                        if (Test-Path $sourcePath) {
+                            Write-Host "Copying LIMS folder structure..."
+                            
+                            
+                            Copy-Item -Path (Join-Path $sourcePath '*') `
+                                    -Destination $tempFolder -Recurse -Force
+
+                        } else {
+                            throw "Source Path does not exist: $sourcePath"
+                        }
+
+                        $fileName = "$env:reportReleaseFileName-$env:Version-$env:BUILD_NUMBER.7z"
+                        $zipDest = Join-Path $env:reportReleaseFolder $fileName
+
+                        Write-Host "Creating report package at: $zipDest"
+
+                        $7zipoutput = & "C:/Program Files/7-Zip/7z.exe" a -t7z -mx=9 -m0=LZMA2 -ms=1g -r $zipDest "$tempFolder/*" 2>&1
+                        $7zipoutput | ForEach-Object { Write-Host $_ }
+
+                        if (Test-Path $zipDest) {
+                            Write-Host "Report package created successfully: $zipDest"
+                        } else {
+                            throw "Failed to create report package at: $zipDest"
+                        }
+                    }
+                    catch {
+                        Write-Error "An error occurred during report packaging: $_"
+                        throw
+                    }
+                    finally {
+                        if (Test-Path $tempFolder) {
+                            Write-Host "Cleaning up temporary folder: $tempFolder"
+                            Remove-Item -Recurse -Force $tempFolder
+                        }
+                    }
+
+                    '''
+                    powershell (
+                        script: powershellScript,
+                        returnStatus: true
+                    )
+
+                }
+            }
+         }
+         stage ('Run_PowerShell_Script')
+         {
+            steps
+            {
+               script
+               {
+                  try
+                  {
+                     
+                     def command = " & '${scriptPath}' -version '${env.Version}' -buildNumber '${env.BUILD_NUMBER}' -FTEBaseData '${env.FTEBaseData}'"
+                     def powershellOutput = powershell(
+                        script: command,
+                        returnStatus: true
+                     )
+                        
+                     if (powershellOutput != 0)
+                     {
+                        echo "powershell script executed with non-zero status :  ${powershellOutput}"
+                        currentBuild.status = 'FAILURE'
+                     }
+                  }
+                  catch (err)
+                  {
+                     error "occured while running the powershell script: ${err}"
+                     currentBuild.status = 'FAILURE'
+                  }
+               }
+            }
+         }
+         
+    }
+ }
+ //Development
